@@ -1,0 +1,156 @@
+#!/usr/bin/env ruby
+#
+#  Copyright 2023 The original authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+
+# Based on https://github.com/gunnarmorling/1brc/blob/main/src/main/java/dev/morling/onebrc/CreateMeasurements.java
+
+require "csv"
+
+# Sanity checks out input and prints out usage if input is not a positive integer
+def check_args(argv)
+  if argv.size != 1 || argv[0].to_i <= 0
+    puts "Usage:  create_measurements <positive integer number of records to create>"
+    puts "        You can use underscore notation for large number of records."
+    puts "        For example:  1_000_000_000 for one billion"
+
+    exit 1
+  end
+end
+
+# Grabs the weather station names from example data provided in repo and dedups
+def build_weather_station_name_list
+  weather_stations_path = File.expand_path("#{__dir__}/../data/weather_stations.csv")
+  rows = CSV.read(weather_stations_path)
+  rows.shift while rows[0][0].start_with?("#")
+
+  rows.map { |r| r[0].split(";").first }.uniq
+end
+
+# Convert bytes to a human-readable format (e.g., KiB, MiB, GiB)
+def convert_bytes(num)
+  %w[bytes KiB MiB GiB].each do |x|
+    if num < 1024.0
+      return format("%<num>3.1f %<x>s", num: num, x: x)
+    end
+
+    num /= 1024.0
+  end
+
+  raise "Not expected to reachable"
+end
+
+# Tries to estimate how large a file the test data will be
+def estimate_file_size(weather_station_names, num_rows_to_create)
+  total_name_bytes = weather_station_names.map(&:bytesize).sum
+  avg_name_bytes = total_name_bytes.fdiv(weather_station_names.size)
+
+  # avg_temp_bytes = (-999..1000).map { |n| (n / 10.0).to_s.size }.sum.fdiv(1999)
+  avg_temp_bytes = 4.402701350675338
+
+  # add 2 for separator and newline
+  avg_line_length = avg_name_bytes + avg_temp_bytes + 2
+
+  human_file_size = convert_bytes(num_rows_to_create * avg_line_length)
+
+  "Estimated max file size is:  #{human_file_size}."
+end
+
+# Format elapsed time in a human-readable format
+def format_elapsed_time(seconds)
+  if seconds < 60
+    format("%.3f seconds", seconds)
+  elsif seconds < 3600
+    minutes, seconds = seconds.divmod(60)
+    "#{minutes} minutes #{seconds} seconds"
+  else
+    hours, remainder = seconds.divmod(3600)
+    minutes, seconds = remainder.divmod(60)
+
+    if minutes.zero?
+      "#{hours} hours #{seconds} seconds"
+    else
+      "#{hours} hours #{minutes} minutes #{seconds} seconds"
+    end
+  end
+end
+
+# Generates and writes to file the requested length of test data
+def build_test_data(weather_station_names, num_rows_to_create)
+  start_time = Time.now
+  coldest_temp = -99.9
+  hottest_temp = 99.9
+
+  station_names_10k_max = weather_station_names.sample(10_000)
+  batch_size = 10_000 # instead of writing line by line to file, process a batch of stations and put it to disk
+  chunks = num_rows_to_create / batch_size + 1
+
+  puts "Building test data..."
+  output_path = File.expand_path("#{__dir__}/../data/measurements.txt")
+
+  begin
+    File.open(output_path, "w") do |f|
+      progress = 0
+
+      chunks.times do |chunk|
+        batch = station_names_10k_max.sample(batch_size)
+
+        rows = batch.map do |station_name|
+          # %.1f should quicker than round on a large scale, because round utilizes mathematical operation
+          format("%<name>s;%<temp>.1f", name: station_name, temp: rand(coldest_temp..hottest_temp))
+        end
+        f.write(rows.join("\n") + "\n")
+
+        # Update progress bar every 1%
+        if (chunk * 100 / chunks) != progress
+          progress = chunk * 100 / chunks
+          bars = "=" * (progress / 2)
+          puts "\r[#{bars.ljust(50)}] #{progress}%"
+        end
+      end
+    end
+
+    puts "\n"
+  rescue StandardError => e
+    puts "Something went wrong. Printing error info and exiting..."
+    puts e
+    exit 1
+  end
+
+  end_time = Time.now
+  elapsed_time = end_time - start_time
+  file_size = File.size(output_path)
+  human_file_size = convert_bytes(file_size)
+
+  puts "Test data successfully written to data/measurements.txt"
+  puts "Actual file size:  #{human_file_size}"
+  puts "Elapsed time: #{format_elapsed_time(elapsed_time)}"
+end
+
+def main
+  check_args(ARGV)
+
+  num_rows_to_create = ARGV[0].to_i
+
+  weather_station_names = build_weather_station_name_list
+
+  puts estimate_file_size(weather_station_names, num_rows_to_create)
+
+  build_test_data(weather_station_names, num_rows_to_create)
+
+  puts "Test data build complete."
+end
+
+main
