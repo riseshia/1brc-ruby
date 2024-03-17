@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
 TARGET_PATH = ARGV.first || "measurements.txt"
-BUFFER_SIZE = 110
+FILE_READ_BUFFER_SIZE = 110
+PARSER_NUM = 16
+BULK_ENQUEUE_SIZE = 10_000
 
 Row = Data.define(:name, :temperature)
 Result = Data.define(:min, :max, :mean)
@@ -17,13 +19,15 @@ end
 def make_parser(passed_queue, passed_router)
   Ractor.new(passed_queue, passed_router) do |queue, router|
     loop do
-      row_str = queue.take
-      break if row_str.nil? # go fin process if passed nil
+      row_strs = queue.take
+      break if row_strs.nil? # go fin process if passed nil
 
-      name, temperature = row_str.split(";")
+      rows = row_strs.map do |row_str|
+        name, temperature = row_str.split(";")
 
-      row = Row.new(name:, temperature: temperature.to_f)
-      router.send(row)
+        Row.new(name:, temperature: temperature.to_f)
+      end
+      router.send(rows)
     end
     # puts "fin parser"
   end
@@ -56,14 +60,15 @@ def make_router
     merger_per_name = {}
 
     loop do
-      row = Ractor.receive
+      rows = Ractor.receive
 
-      break if row.nil? # go fin process if passed nil
+      break if rows.nil? # go fin process if passed nil
 
-      merger_per_name[row.name] ||= make_merger
-      merger = merger_per_name[row.name]
-
-      merger.send(row)
+      rows.each do |row|
+        merger_per_name[row.name] ||= make_merger
+        merger = merger_per_name[row.name]
+        merger.send(row)
+      end
     end
 
     merger_per_name.each_value { |r| r.send(nil) } # send fin signal
@@ -75,17 +80,23 @@ end
 def main
   queue_ractor = make_queue
   router_ractor = make_router
-  parser_num = 8
-  parser_ractors = parser_num.times.map { make_parser(queue_ractor, router_ractor) }
+  parser_ractors = PARSER_NUM.times.map { make_parser(queue_ractor, router_ractor) }
 
   File.open(TARGET_PATH) do |f|
-    f.each_line(BUFFER_SIZE) do |row|
-      queue_ractor.send(row[0], move: true)
+    buffer = []
+    f.each_line(FILE_READ_BUFFER_SIZE, chomp: true) do |row|
+      buffer << row
+
+      if buffer.size > BULK_ENQUEUE_SIZE
+        queue_ractor.send(buffer)
+        buffer = []
+      end
     end
+    queue_ractor.send(buffer) if !buffer.empty?
   end
 
   # ensure parser fin
-  parser_num.times { queue_ractor.send(nil) }
+  PARSER_NUM.times { queue_ractor.send(nil) }
   parser_ractors.each { |r| r.take }
 
   # ensure router fin
