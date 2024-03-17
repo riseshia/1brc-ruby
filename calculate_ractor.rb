@@ -1,8 +1,7 @@
 # frozen_string_literal: true
 
-require "csv"
-
-TARGET_PATH = "measurements.txt"
+TARGET_PATH = ARGV.first || "measurements.txt"
+BUFFER_SIZE = 110
 
 Row = Data.define(:name, :temperature)
 Result = Data.define(:min, :max, :mean)
@@ -79,8 +78,10 @@ def main
   parser_num = 8
   parser_ractors = parser_num.times.map { make_parser(queue_ractor, router_ractor) }
 
-  CSV.foreach(TARGET_PATH) do |row|
-    queue_ractor.send(row[0], move: true)
+  File.open(TARGET_PATH) do |f|
+    f.each_line(BUFFER_SIZE) do |row|
+      queue_ractor.send(row[0], move: true)
+    end
   end
 
   # ensure parser fin
